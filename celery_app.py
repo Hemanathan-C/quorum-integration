@@ -32,6 +32,17 @@ import time
 from celery import Celery
 from kombu import Exchange, Queue
 
+# ---------------------------------------------------------------------------
+# Quorum-queue compatibility: force per-consumer (non-global) QoS.
+#
+# Celery's Tasks bootstep sets qos_global = not connection.qos_semantics_matches_spec.
+# For RabbitMQ >= 3.3 that property returns False, so qos_global becomes True.
+# Quorum queues reject basic.qos with global=True.  Returning True here makes
+# qos_global=False throughout the worker lifecycle (initial set + every update).
+# ---------------------------------------------------------------------------
+from kombu.transport.pyamqp import Transport as _PyAMQPTransport  # type: ignore[import]
+_PyAMQPTransport.qos_semantics_matches_spec = lambda *_: True
+
 BROKER_URL = "amqp://guest:guest@localhost:5672//"
 
 # Main processing queues that tasks can be routed to.
@@ -52,7 +63,9 @@ dlx = Exchange("delay.dlx", type="direct", durable=True)
 
 # Main queues: bound to the DLX by their own name, so expired messages land here.
 MAIN_QUEUE_OBJS = [
-    Queue(name, exchange=dlx, routing_key=name, durable=True) for name in MAIN_QUEUES
+    Queue(name, exchange=dlx, routing_key=name, durable=True,
+          queue_arguments={"x-queue-type": "quorum"})
+    for name in MAIN_QUEUES
 ]
 
 
@@ -69,6 +82,7 @@ def _delay_queue(seconds: int) -> Queue:
         routing_key="",                                  # fanout ignores the key
         durable=True,
         queue_arguments={
+            "x-queue-type": "quorum",
             "x-message-ttl": seconds * 1000,             # TTL in milliseconds
             "x-dead-letter-exchange": dlx.name,          # set at QUEUE level
             # NO x-dead-letter-routing-key: keep the message's own key (the target)
